@@ -1,0 +1,24 @@
+{
+  "name": "lazarus-neon-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cykusoft-glitch/lazarus-neon-api.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/cykusoft-glitch/lazarus-neon-api/issues"
+  },
+  "homepage": "https://github.com/cykusoft-glitch/lazarus-neon-api#readme",
+  "dependencies": {
+    "@neondatabase/serverless": "^1.1.0"
+  }
+}
