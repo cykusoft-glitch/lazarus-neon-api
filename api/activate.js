@@ -1,38 +1,27 @@
 // api/activate.js
-const { Pool } = require('pg');
-const crypto = require('crypto');
+import { neon } from '@neondatabase/serverless';
+import crypto from 'crypto';
 
 // ================================================================
-// 1. KONEKSI DATABASE (Pool reusable)
+// KONEKSI DATABASE (sama seperti versions.js)
 // ================================================================
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }, // Diperlukan untuk Neon
-});
-
-// ================================================================
-// 2. PEPPER DARI ENV
-// ================================================================
+const sql = neon(process.env.DATABASE_URL);
 const PEPPER = process.env.SERVER_PEPPER;
-if (!PEPPER) {
-    console.error("FATAL: SERVER_PEPPER environment variable is not set!");
-}
 
 // ================================================================
-// 3. FUNGSI GENERATE SERIAL (Format XXXX-XXXX-XXXX-XXXX)
+// GENERATE SERIAL (format XXXX-XXXX-XXXX-XXXX)
 // ================================================================
 function generateSerial() {
-    // 8 bytes = 16 hex chars -> dipisah jadi 4 blok @ 4 karakter
     const bytes = crypto.randomBytes(8);
     const raw = bytes.toString('hex').toUpperCase();
     return raw.match(/.{4}/g).join('-');
 }
 
 // ================================================================
-// 4. HANDLER VERCELL
+// HANDLER
 // ================================================================
-module.exports = async (req, res) => {
-    // --- CORS (agar bisa dipanggil dari Python / Electron) ---
+export default async function handler(req, res) {
+    // --- CORS ---
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     if (req.method === 'OPTIONS') {
@@ -50,41 +39,51 @@ module.exports = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Invalid fp_primary (must be SHA256 hex)' });
     }
 
-    const client = await pool.connect();
+    // --- Cek Pepper ---
+    if (!PEPPER) {
+        console.error('SERVER_PEPPER is not set');
+        return res.status(500).json({ success: false, message: 'Server configuration error' });
+    }
+
     try {
         // ============================================================
-        // LANGKAH A: Cek apakah fp_primary sudah terdaftar?
-        // Server akan menyimpan SHA256(fp_primary + PEPPER) di DB
+        // LANGKAH A: Hash fp_primary dengan pepper
         // ============================================================
         const hashedWithPepper = crypto
             .createHash('sha256')
             .update(fp_primary + PEPPER)
             .digest('hex');
 
-        const checkQuery = 'SELECT serial_number, status FROM licenses WHERE fp_hash = $1';
-        const checkResult = await client.query(checkQuery, [hashedWithPepper]);
+        // ============================================================
+        // LANGKAH B: Cek apakah sudah terdaftar
+        // ============================================================
+        const existing = await sql`
+            SELECT serial_number, status 
+            FROM device_licenses 
+            WHERE fp_hash = ${hashedWithPepper}
+        `;
 
-        if (checkResult.rows.length > 0) {
-            // Device sudah teraktivasi - kembalikan SN yang sudah ada
-            const license = checkResult.rows[0];
+        if (existing && existing.length > 0) {
             return res.status(200).json({
                 success: true,
                 message: 'Device already activated',
-                serial_number: license.serial_number,
-                status: license.status
+                serial_number: existing[0].serial_number,
+                status: existing[0].status
             });
         }
 
         // ============================================================
-        // LANGKAH B: Generate SN unik (dengan handling collision)
+        // LANGKAH C: Generate SN unik (dengan collision handling)
         // ============================================================
         let serial = generateSerial();
-        let isUnique = false;
         let attempts = 0;
+        let isUnique = false;
+
         while (!isUnique && attempts < 5) {
-            const existsQuery = 'SELECT 1 FROM licenses WHERE serial_number = $1';
-            const existsResult = await client.query(existsQuery, [serial]);
-            if (existsResult.rows.length === 0) {
+            const check = await sql`
+                SELECT 1 FROM device_licenses WHERE serial_number = ${serial}
+            `;
+            if (check && check.length === 0) {
                 isUnique = true;
             } else {
                 serial = generateSerial();
@@ -93,30 +92,37 @@ module.exports = async (req, res) => {
         }
 
         if (!isUnique) {
-            throw new Error('Failed to generate unique serial number after 5 attempts');
+            throw new Error('Failed to generate unique serial after 5 attempts');
         }
 
         // ============================================================
-        // LANGKAH C: Simpan ke Database
+        // LANGKAH D: Simpan ke database
         // ============================================================
-        const insertQuery = `
-            INSERT INTO licenses (serial_number, fp_hash, fp_secondary_hash, status, activation_count, created_at)
-            VALUES ($1, $2, $3, 'active', 1, NOW())
-            RETURNING serial_number
+        await sql`
+            INSERT INTO device_licenses (
+                serial_number, 
+                fp_hash, 
+                fp_secondary_hash, 
+                status, 
+                activation_count, 
+                created_at
+            ) VALUES (
+                ${serial}, 
+                ${hashedWithPepper}, 
+                ${fp_secondary || null}, 
+                'active', 
+                1, 
+                NOW()
+            )
         `;
-        const insertResult = await client.query(insertQuery, [
-            serial,
-            hashedWithPepper,
-            fp_secondary || null // optional
-        ]);
 
         // ============================================================
-        // LANGKAH D: Kirim response sukses
+        // LANGKAH E: Response sukses
         // ============================================================
         return res.status(201).json({
             success: true,
             message: 'Activation successful',
-            serial_number: insertResult.rows[0].serial_number
+            serial_number: serial
         });
 
     } catch (error) {
@@ -125,7 +131,5 @@ module.exports = async (req, res) => {
             success: false,
             message: 'Internal server error: ' + error.message
         });
-    } finally {
-        client.release();
     }
-};
+}
